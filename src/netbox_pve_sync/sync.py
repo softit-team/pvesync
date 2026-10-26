@@ -133,7 +133,7 @@ class Synchronizer:
             self._update_vm(vm, desired, result)
         result.netbox_id = int(vm["id"])
 
-        iface = self._ensure_interface(vm, result)
+        iface = self._ensure_interface(vm, desired, result)
         if desired.ip is None:
             log(logger, logging.DEBUG, "No usable IP now; keeping the NetBox IP unchanged", vmid=desired.vmid,
                 reason=desired.ip_status)
@@ -169,9 +169,64 @@ class Synchronizer:
         }
         if self.prereqs.site_id is not None:
             fields["site"] = self.prereqs.site_id
+        if self.prereqs.role_id is not None:
+            fields["role"] = self.prereqs.role_id
+        device = self._device_for(desired)
+        if device is not None:
+            fields["device"] = device[1]
         if self.config.sync.sync_status and desired.netbox_status is not None:
             fields["status"] = desired.netbox_status
         return fields
+
+    def _device_for(self, desired: DesiredVM) -> tuple[str, int] | None:
+        """The cluster's host device: the only one, or else the one named like the Proxmox node."""
+        devices = self.prereqs.devices
+        if len(devices) == 1:
+            return devices[0]
+        return next((d for d in devices if d[0].lower() == desired.node.lower()), None)
+
+    def _vm_holding_ip(self, desired: DesiredVM) -> dict[str, Any] | None:
+        """The NetBox VM the guest's IP is already assigned to, if any."""
+        if desired.ip is None:
+            return None
+        for ip in self.nb.ips_by_address(desired.ip.cidr, self.prereqs.vrf_id):
+            if ip.get("assigned_object_type") != VMINTERFACE_TYPE:
+                continue
+            vm_id = obj_id((ip.get("assigned_object") or {}).get("virtual_machine"))
+            if vm_id is not None:
+                return self.nb.get(EP_VMS, vm_id)
+        return None
+
+    def _adopt_by_ip(self, desired: DesiredVM, result: SyncResult) -> tuple[bool, dict[str, Any] | None]:
+        """Avoid a duplicate when NetBox already has this VM under another name: find it by its IP.
+
+        Returns (handled, vm). ``handled`` False means: go on with the name check / creation.
+        """
+        holder = self._vm_holding_ip(desired)
+        if holder is None:
+            return False, None
+        cf = holder.get("custom_fields") or {}
+        if self.is_owned(holder):
+            return False, None  # another Proxmox VM of ours has this IP: reported as an IP conflict later
+        cluster = obj_id(holder.get("cluster"))
+        assert desired.ip is not None
+        if cf.get(CF_VMID) is None and cluster in (None, self.prereqs.cluster_id):
+            log(logger, logging.INFO, "Adopting existing NetBox VM that already has this IP", vmid=desired.vmid,
+                name=desired.name, netbox_name=holder.get("name"), netbox_id=holder["id"], ip=desired.ip.cidr)
+            result.changes.append(f"adopted existing NetBox VM '{holder.get('name')}' #{holder['id']} by IP")
+            self._update_vm(holder, desired, result, adopting=True)
+            result.outcome = "updated"
+            return True, holder
+        why = ("it belongs to another Proxmox VM/source" if cf.get(CF_VMID) is not None
+               else f"it is in another cluster ({(holder.get('cluster') or {}).get('name', cluster)})")
+        msg = (f"IP {desired.ip.cidr} is already assigned to NetBox VM '{holder.get('name')}' and {why}; "
+               "not creating a second VM for it")
+        log(logger, logging.ERROR, "Cannot create VM in NetBox: IP belongs to another VM", vmid=desired.vmid,
+            name=desired.name, netbox_id=holder["id"], detail=msg)
+        result.warnings.append(msg)
+        result.conflict = True
+        result.outcome = "conflict"
+        return True, None
 
     def _name_taken(self, name: str, except_id: int | None) -> dict[str, Any] | None:
         # NetBox enforces case-insensitive unique VM names per cluster (and tenant).
@@ -181,6 +236,10 @@ class Synchronizer:
         return None
 
     def _adopt_or_create(self, desired: DesiredVM, result: SyncResult) -> dict[str, Any] | None:
+        if self.config.sync.adopt_by_ip:
+            handled, vm = self._adopt_by_ip(desired, result)
+            if handled:
+                return vm
         clash = self._name_taken(desired.name, None)
         if clash is not None:
             cf = clash.get("custom_fields") or {}
@@ -232,6 +291,13 @@ class Synchronizer:
         if "site" in want and obj_id(vm.get("site")) != want["site"]:
             patch["site"] = want["site"]
             result.changes.append(f"site -> {self.config.netbox.site}")
+        if "role" in want and obj_id(vm.get("role")) != want["role"]:
+            patch["role"] = want["role"]
+            result.changes.append(f"role -> {self.config.netbox.vm_role}")
+        device = self._device_for(desired)
+        if device is not None and obj_id(vm.get("device")) != device[1]:
+            patch["device"] = device[1]
+            result.changes.append(f"device -> {device[0]}")
         if "status" in want and _choice(vm.get("status")) != want["status"]:
             patch["status"] = want["status"]
             result.changes.append(f"status {_choice(vm.get('status'))} -> {want['status']}")
@@ -289,11 +355,17 @@ class Synchronizer:
         self.nb.delete(EP_VMS, vm_id, describe=f"VM {vm.get('name')} (#{vm_id})")
 
     # ================================================================ interface
-    def _ensure_interface(self, vm: dict[str, Any], result: SyncResult) -> dict[str, Any]:
+    def _ensure_interface(self, vm: dict[str, Any], desired: DesiredVM, result: SyncResult) -> dict[str, Any]:
         vm_id = int(vm["id"])
-        for iface in self.nb.vm_interfaces(vm_id):
+        ifaces = self.nb.vm_interfaces(vm_id)
+        for iface in ifaces:
             if iface.get("name") == self.ifname:
                 return iface
+        if desired.ip is not None:
+            # An adopted VM may carry its IP on an interface named differently (ens18, ...): use that one.
+            for iface in ifaces:
+                if any(_host(ip["address"]) == desired.ip.address for ip in self.nb.ips_on_interface(int(iface["id"]))):
+                    return iface
         data = {"virtual_machine": vm_id, "name": self.ifname, "enabled": True, "tags": [self.prereqs.tag_id]}
         try:
             iface = self.nb.create(EP_VM_INTERFACES, data, describe=f"interface {self.ifname} on VM {vm.get('name')}")

@@ -41,6 +41,8 @@ EP_VM_INTERFACES = "/api/virtualization/interfaces/"
 EP_IPS = "/api/ipam/ip-addresses/"
 EP_VRFS = "/api/ipam/vrfs/"
 EP_SITES = "/api/dcim/sites/"
+EP_DEVICES = "/api/dcim/devices/"
+EP_DEVICE_ROLES = "/api/dcim/device-roles/"
 EP_TAGS = "/api/extras/tags/"
 EP_CUSTOM_FIELDS = "/api/extras/custom-fields/"
 VMINTERFACE_TYPE = "virtualization.vminterface"
@@ -220,6 +222,14 @@ class NetBoxClient:
     def site(self, name: str) -> dict[str, Any] | None:
         """Look a site up by name (as shown in the UI dropdown), falling back to its slug."""
         return self.find_one(EP_SITES, "site", name=name) or self.find_one(EP_SITES, "site", slug=name)
+
+    def device_role(self, name: str) -> dict[str, Any] | None:
+        """Look a role up by name (as shown in the UI dropdown), falling back to its slug."""
+        return (self.find_one(EP_DEVICE_ROLES, "role", name=name)
+                or self.find_one(EP_DEVICE_ROLES, "role", slug=name))
+
+    def devices_in_cluster(self, cluster_id: int) -> list[dict[str, Any]]:
+        return self.list_all(EP_DEVICES, cluster_id=cluster_id)
 
     def custom_field(self, name: str) -> dict[str, Any] | None:
         return self.find_one(EP_CUSTOM_FIELDS, "custom field", name=name)

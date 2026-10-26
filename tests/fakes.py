@@ -65,6 +65,7 @@ class FakeNetBox(FakeSessionBase):
         self.tables: dict[str, dict[int, dict[str, Any]]] = {
             "clusters": {}, "virtual-machines": {}, "interfaces": {}, "ip-addresses": {},
             "tags": {}, "custom-fields": {}, "vrfs": {}, "sites": {}, "cluster-groups": {},
+            "devices": {}, "device-roles": {},
         }
         self.writes: list[tuple[str, str, int | None]] = []
 
@@ -133,6 +134,8 @@ class FakeNetBox(FakeSessionBase):
         if table == "virtual-machines":
             out["cluster"] = self._ref("clusters", obj.get("cluster"), "name")
             out["site"] = self._ref("sites", obj.get("site"), "name", "slug")
+            out["role"] = self._ref("device-roles", obj.get("role"), "name", "slug")
+            out["device"] = self._ref("devices", obj.get("device"), "name")
             if out.get("status") is not None:
                 out["status"] = {"value": out["status"], "label": str(out["status"]).capitalize()}
             out["primary_ip4"] = self._ref("ip-addresses", obj.get("primary_ip4"), "address")
@@ -141,6 +144,9 @@ class FakeNetBox(FakeSessionBase):
         elif table == "clusters":
             out["site"] = self._ref("sites", obj.get("site"), "name", "slug")
             out["group"] = self._ref("cluster-groups", obj.get("group"), "name", "slug")
+        elif table == "devices":
+            out["site"] = self._ref("sites", obj.get("site"), "name", "slug")
+            out["cluster"] = self._ref("clusters", obj.get("cluster"), "name")
         elif table == "interfaces":
             out["virtual_machine"] = self._ref("virtual-machines", obj["virtual_machine"], "name")
         elif table == "ip-addresses":
@@ -203,6 +209,9 @@ class FakeNetBox(FakeSessionBase):
         cluster = self.tables["clusters"].get(obj.get("cluster") or -1)
         if cluster and cluster.get("site") and obj.get("site") and cluster["site"] != obj["site"]:
             return "The selected cluster is not assigned to this site."
+        device = self.tables["devices"].get(obj.get("device") or -1)
+        if device and device.get("cluster") != obj.get("cluster"):
+            return "The selected device is not assigned to this cluster."
         primary = obj.get("primary_ip4")
         if primary is not None:
             ip = self.tables["ip-addresses"].get(primary)

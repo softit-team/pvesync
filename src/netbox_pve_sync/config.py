@@ -200,6 +200,7 @@ class NetBoxConfig:
     tag: str = "tag"
     site: str | None = None
     cluster_group: str | None = "Proxmox"
+    vm_role: str | None = "Virtual-Server"
 
 
 @dataclass(frozen=True)
@@ -226,6 +227,7 @@ class SyncConfig:
     reconciliation_interval: float = 6 * 3600.0
     reconcile_on_startup: bool = True
     adopt_existing: bool = False
+    adopt_by_ip: bool = True
     claim_unassigned_ips: bool = True
     ip_cleanup_policy: str = "delete_managed"
     max_deletions_per_run: int = 10
@@ -318,6 +320,7 @@ def parse_config(raw: Any, *, env: dict[str, str] | None = None, source_path: Pa
         tag=nb.opt_str("tag", "tag") or "tag",
         site=nb.opt_str("site"),
         cluster_group=nb.opt_str("cluster_group") if "cluster_group" in nb.data else "Proxmox",
+        vm_role=nb.opt_str("vm_role") if "vm_role" in nb.data else "Virtual-Server",
     )
     nb.finish()
     if not re.match(r"^[-a-z0-9_]+$", netbox.tag):
@@ -353,6 +356,7 @@ def parse_config(raw: Any, *, env: dict[str, str] | None = None, source_path: Pa
         reconciliation_interval=sy.opt_duration("reconciliation_interval", "6h"),
         reconcile_on_startup=sy.opt_bool("reconcile_on_startup", True),
         adopt_existing=sy.opt_bool("adopt_existing", False),
+        adopt_by_ip=sy.opt_bool("adopt_by_ip", True),
         claim_unassigned_ips=sy.opt_bool("claim_unassigned_ips", True),
         ip_cleanup_policy=policy,
         max_deletions_per_run=sy.opt_int("max_deletions_per_run", 10),

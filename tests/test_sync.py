@@ -560,3 +560,104 @@ def test_untagged_ip_gets_vm_name_only_if_description_blank(service: SyncService
 
     netbox.tables["ip-addresses"][blank["id"]]["description"] = ""     # cleared later in NetBox
     assert "ip description -> web01" in service.sync_vmid(101, force=True).changes
+
+
+# ---------------------------------------------------------------- role and host device
+def test_role_and_single_device_are_set(make_service: ServiceFactory, proxmox: FakeProxmox,
+                                        netbox: FakeNetBox) -> None:
+    role = netbox.add("device-roles", name="Virtual-Server", slug="virtual-server", vm_role=True)
+    host = netbox.add("devices", name="lenovo-office01", cluster=netbox.cluster_id(), site=None)
+    svc = make_service()
+    svc.check_netbox()
+    proxmox.add_vm(101, "web01", node="pve-other-name")
+    svc.sync_vmid(101)
+    vm = nb_vm(netbox, "web01")
+    assert vm["role"] == role["id"]
+    assert vm["device"] == host["id"]
+
+    netbox.tables["virtual-machines"][vm["id"]]["role"] = None      # changed by hand: put back
+    assert "role -> Virtual-Server" in svc.sync_vmid(101, force=True).changes
+
+
+def test_several_devices_matched_by_node_name(make_service: ServiceFactory, proxmox: FakeProxmox,
+                                              netbox: FakeNetBox) -> None:
+    netbox.add("devices", name="pve1", cluster=netbox.cluster_id(), site=None)
+    pve2 = netbox.add("devices", name="PVE2", cluster=netbox.cluster_id(), site=None)
+    svc = make_service()
+    svc.check_netbox()
+    proxmox.add_vm(101, "web01", node="pve2")
+    proxmox.add_vm(102, "web02", node="pve9", ip="192.168.1.51/24", mac="BC:24:11:00:00:02")
+    svc.sync_vmid(101)
+    svc.sync_vmid(102)
+    assert nb_vm(netbox, "web01")["device"] == pve2["id"]
+    assert nb_vm(netbox, "web02").get("device") is None
+
+
+def test_missing_role_does_not_block_sync(service: SyncService, proxmox: FakeProxmox, netbox: FakeNetBox) -> None:
+    proxmox.add_vm(101, "web01")
+    assert service.sync_vmid(101).outcome == "created"
+    assert nb_vm(netbox, "web01").get("role") is None
+
+
+# ---------------------------------------------------------------- no duplicates: match by IP
+def _hand_made_vm(netbox: FakeNetBox, name: str, ip: str, *, cluster: int | None, ifname: str = "ens18",
+                  custom_fields: dict | None = None) -> tuple[dict, dict]:
+    vm = netbox.add("virtual-machines", name=name, cluster=cluster, tags=[], primary_ip4=None, memory=1,
+                    custom_fields=custom_fields or {"proxmox_vmid": None, "proxmox_source": None})
+    iface = netbox.add("interfaces", virtual_machine=vm["id"], name=ifname)
+    addr = netbox.add("ip-addresses", address=ip, vrf=None, tags=[], description="",
+                      assigned_object_type=VMI, assigned_object_id=iface["id"])
+    vm["primary_ip4"] = addr["id"]
+    return vm, addr
+
+
+def test_existing_vm_with_other_name_is_adopted_by_ip(service: SyncService, proxmox: FakeProxmox,
+                                                      netbox: FakeNetBox) -> None:
+    old, addr = _hand_made_vm(netbox, "web-01 (old)", "192.168.1.50/24", cluster=netbox.cluster_id())
+    proxmox.add_vm(101, "web01", memory=4096, ip="192.168.1.50/24")
+    result = service.sync_vmid(101)
+
+    assert len(netbox.vms()) == 1, "must not create a second VM for the same IP"
+    vm = netbox.tables["virtual-machines"][old["id"]]
+    assert vm["name"] == "web01"
+    assert vm["memory"] == 4096
+    assert vm["custom_fields"] == {"proxmox_vmid": 101, "proxmox_source": "PVE-Test"}
+    assert vm["primary_ip4"] == addr["id"]
+    assert [i["name"] for i in netbox.interfaces_of(vm["id"])] == ["ens18"], "no extra empty eth0"
+    assert len(netbox.ips()) == 1
+    assert any("adopted" in c for c in result.changes)
+    assert service.sync_vmid(101, force=True).outcome == "unchanged"
+
+
+def test_vm_without_cluster_is_adopted_by_ip(service: SyncService, proxmox: FakeProxmox, netbox: FakeNetBox) -> None:
+    old, _ = _hand_made_vm(netbox, "WEB", "192.168.1.50/24", cluster=None)
+    proxmox.add_vm(101, "web01")
+    service.sync_vmid(101)
+    assert [v["id"] for v in netbox.vms()] == [old["id"]]
+    assert netbox.vms()[0]["cluster"] == netbox.cluster_id()
+
+
+@pytest.mark.parametrize("cluster, cf", [
+    ("other", None),
+    ("ours", {"proxmox_vmid": 555, "proxmox_source": "PVE-Elsewhere"}),
+])
+def test_ip_held_by_vm_we_may_not_take_blocks_creation(service: SyncService, proxmox: FakeProxmox,
+                                                       netbox: FakeNetBox, cluster: str, cf: dict | None) -> None:
+    cluster_id = netbox.add_cluster("PVE-Other")["id"] if cluster == "other" else netbox.cluster_id()
+    old, _ = _hand_made_vm(netbox, "web-x", "192.168.1.50/24", cluster=cluster_id, custom_fields=cf)
+    proxmox.add_vm(101, "web01")
+    with pytest.raises(ConflictError, match="not creating a second VM"):
+        service.sync_vmid(101)
+    assert [v["id"] for v in netbox.vms()] == [old["id"]]
+    assert netbox.tables["virtual-machines"][old["id"]]["memory"] == 1
+
+
+def test_adopt_by_ip_can_be_disabled(make_service: ServiceFactory, proxmox: FakeProxmox, netbox: FakeNetBox) -> None:
+    _hand_made_vm(netbox, "web-x", "192.168.1.50/24", cluster=netbox.cluster_id())
+    svc = make_service(sync={"adopt_by_ip": False})
+    svc.check_netbox()
+    proxmox.add_vm(101, "web01")
+    with pytest.raises(ConflictError, match="not taking it over"):    # old behaviour: new VM, IP conflict
+        svc.sync_vmid(101)
+    assert nb_vm(netbox, "web01")["custom_fields"]["proxmox_vmid"] == 101
+    assert len(netbox.vms()) == 2

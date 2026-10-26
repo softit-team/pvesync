@@ -140,7 +140,7 @@ user `netbox-pve-sync` (not staff, not superuser). Then add these **object permi
 |-----------------------------------|----------------------------------------------------------|-----------------------------|
 | netbox-pve-sync: VMs and IPs      | Virtualization › virtual machine, IPAM › IP address      | view, add, change, delete   |
 | netbox-pve-sync: interfaces       | Virtualization › interface                               | view, add                   |
-| netbox-pve-sync: read-only lookups| Virtualization › cluster, DCIM › site, Extras › tag, Extras › custom field, IPAM › VRF | view |
+| netbox-pve-sync: read-only lookups| Virtualization › cluster, DCIM › site, DCIM › device, DCIM › device role, Extras › tag, Extras › custom field, IPAM › VRF | view |
 | netbox-pve-sync: cluster group    | Virtualization › cluster, Virtualization › cluster group | view, add, change           |
 
 Why each one is needed:
@@ -152,7 +152,8 @@ Why each one is needed:
 * **Cluster group**: put the configured cluster in the `Proxmox` cluster group
   (`netbox.cluster_group`), creating the group if it does not exist. Without this permission
   the agent only logs a warning.
-* **Lookups**: find the cluster, the site, the tag, the custom fields and (optional) VRF by name.
+* **Lookups**: find the role (`Virtual-Server`), the cluster's host device,
+  the cluster, the site, the tag, the custom fields and (optional) VRF by name.
 
 The agent does **not** need admin rights. (Optionally restrict the VM permission with a
 constraint such as `{"cluster__name": "PVE-Cyprus"}` - one user per environment - for even
@@ -343,6 +344,8 @@ Main options:
 | `netbox.site` | none | NetBox site (name or slug) set on every VM, e.g. `inmind.ai`; none = site left alone |
 | `netbox.vrf` | none | VRF for created IPs (none = global table) |
 | `netbox.tag` | `tag`             | tag that marks managed objects |
+| `netbox.vm_role` | `Virtual-Server` | role (name or slug, must exist with *VM role* ticked) set on every VM; `null` = leave alone |
+| `netbox.cluster_group` | `Proxmox` | cluster group of `netbox.cluster` (created if missing); `null` = leave alone |
 | `proxmox.verify_ssl` / `ca_bundle` | `true` / cluster CA | TLS verification of the Proxmox API |
 | `proxmox.leader_election` | `true` | only one active agent per PVE cluster |
 | `proxmox.agent_nodes` | all | set if the agent is not installed on every node |
@@ -353,6 +356,7 @@ Main options:
 | `sync.include_templates` | `false` | also sync templates |
 | `sync.exclude_vmids` / `exclude_pve_tags` | `[]` | never sync these VMs |
 | `sync.adopt_existing` | `false` | take over an *unmanaged* NetBox VM with the same name |
+| `sync.adopt_by_ip` | `true` | take over the unmanaged NetBox VM that already has the guest's IP instead of creating a duplicate |
 | `sync.claim_unassigned_ips` | `true` | reuse an existing *unassigned* IP object |
 | `sync.ip_cleanup_policy` | `delete_managed` | see [IP addresses](#ip-addresses) |
 | `sync.sync_status` | `true` | NetBox status follows the power state (running → Active, stopped → Offline) |
@@ -431,6 +435,16 @@ the duplicate removed.
 Name clash: if a NetBox VM with the same name exists in the cluster but is not owned, the
 agent logs an error and does not touch it. Set `sync.adopt_existing: true` to take over such
 VMs (only ones without another `proxmox_vmid`/`proxmox_source`).
+
+Same VM, different name: before creating a VM the agent looks the guest's IP up in NetBox. If
+it is assigned to an unmanaged VM in the cluster (or in no cluster), that VM is taken over and
+renamed to the Proxmox name instead of creating a duplicate; its existing interface and IP are
+kept. If the IP belongs to a VM in another cluster or of another Proxmox source, nothing is
+created and a conflict is logged. Without a known guest IP (agent not running) only the name is
+checked. `sync.adopt_by_ip: false` turns this off.
+
+Host device: every VM gets the device (host) of its cluster. With one device in the cluster that
+one is used; with several, the device named like the Proxmox node. Devices are read at startup.
 
 ## IP addresses
 
@@ -511,6 +525,7 @@ only talks HTTPS to the local Proxmox API with its own token.
 | VM has no IP in NetBox | `explain-ip --vmid N`; enable the guest agent option, install the agent in the guest, stop/start the VM |
 | wrong IP chosen | set `ip_selection.prefer_networks` or `exclude_interfaces`, then `sync --vmid N` |
 | `IP conflict: address belongs to another object` | the IP is assigned to another device/VM in NetBox; fix that object (the agent will not steal it) |
+| `Cannot create VM in NetBox: IP belongs to another VM` | the guest's IP is on a VM of another cluster/source: fix that VM or the IP |
 | `Cannot create VM in NetBox: name conflict` | a non-managed NetBox VM has that name: delete/rename it or set `adopt_existing: true` |
 | `BLOCKED deletion of N VM(s)` | check why so many VMs are missing; then `reconcile --allow-mass-delete` |
 | TLS error to Proxmox | custom certificate on 8006: set `proxmox.api_url` to its hostname or its CA in `ca_bundle` |

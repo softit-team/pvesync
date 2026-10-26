@@ -10,6 +10,7 @@ netbox:
   token: "${NETBOX_API_TOKEN}"
   cluster: "PVE-Cyprus"                     # <-- must already exist in NetBox (never auto-created)
   site: "inmind.ai"                         # NetBox site set on every VM (name or slug; must exist). Remove to leave sites alone
+  vm_role: "Virtual-Server"                 # role set on every VM (must exist, "VM role" ticked); null = leave it alone
   cluster_group: "Proxmox"                  # cluster group set on netbox.cluster (created if missing); null = leave it alone
   verify_ssl: true                          # only matters for https:// URLs
   # ca_bundle: /etc/netbox-pve-sync/netbox-ca.pem
@@ -38,6 +39,7 @@ sync:
   exclude_vmids: []                         # e.g. [9000, 9001]
   exclude_pve_tags: []                      # Proxmox tags, e.g. ["no-netbox"]
   adopt_existing: false                     # take over unmanaged NetBox VMs with the same name
+  adopt_by_ip: true                         # take over the unmanaged NetBox VM that already has the guest's IP
   claim_unassigned_ips: true                # use an existing *unassigned* NetBox IP instead of creating one
   ip_cleanup_policy: delete_managed         # or "unassign"; see README "IP addresses"
   max_deletions_per_run: 10                 # safety limit for reconciliation

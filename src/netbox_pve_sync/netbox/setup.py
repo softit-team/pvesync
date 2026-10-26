@@ -44,6 +44,8 @@ class NetBoxPrereqs:
     tag_id: int
     vrf_id: int | None
     site_id: int | None = None
+    role_id: int | None = None
+    devices: tuple[tuple[str, int], ...] = ()   # (name, id) of the devices (hosts) in the cluster
 
 
 def _cf_type(cf: dict[str, Any]) -> str:
@@ -112,7 +114,8 @@ def ensure_prerequisites(client: NetBoxClient, tag_slug: str) -> list[str]:
 
 
 def resolve_prerequisites(client: NetBoxClient, cluster_name: str, tag_slug: str,
-                          vrf_name: str | None, site_name: str | None = None) -> NetBoxPrereqs:
+                          vrf_name: str | None, site_name: str | None = None,
+                          role_name: str | None = None) -> NetBoxPrereqs:
     """Verify everything exists; fail clearly otherwise. Never creates clusters."""
     cluster = client.cluster(cluster_name)
     if cluster is None:
@@ -144,9 +147,25 @@ def resolve_prerequisites(client: NetBoxClient, cluster_name: str, tag_slug: str
                 f"NetBox cluster '{cluster_name}' is assigned to another site (id {pinned}) than "
                 f"netbox.site '{site_name}' (id {site_id}); NetBox would reject every VM. "
                 "Change the cluster's site in NetBox or fix netbox.site.")
+    role_id = None
+    if role_name:
+        role = client.device_role(role_name)
+        if role is None:
+            log(logger, logging.WARNING, f"NetBox role '{role_name}' (netbox.vm_role) does not exist; VM roles "
+                "are left alone. Create it in NetBox (Devices > Device Roles, tick 'VM role')")
+        else:
+            role_id = int(role["id"])
+    devices = []
+    for device in client.devices_in_cluster(int(cluster["id"])):
+        # NetBox rejects a VM whose device is on another site than the VM.
+        if site_id is not None and obj_id(device.get("site")) not in (None, site_id):
+            log(logger, logging.WARNING, f"Device '{device.get('name')}' of cluster '{cluster_name}' is on "
+                f"another site than netbox.site '{site_name}'; not assigning VMs to it")
+            continue
+        devices.append((str(device.get("name") or ""), int(device["id"])))
     assert tag is not None
     return NetBoxPrereqs(cluster_id=int(cluster["id"]), cluster_name=cluster_name, tag_id=int(tag["id"]),
-                         vrf_id=vrf_id, site_id=site_id)
+                         vrf_id=vrf_id, site_id=site_id, role_id=role_id, devices=tuple(devices))
 
 
 def ensure_cluster_group(client: NetBoxClient, cluster_name: str, group_name: str) -> list[str]:

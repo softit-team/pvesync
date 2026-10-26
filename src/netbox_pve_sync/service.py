@@ -108,7 +108,8 @@ class SyncService:
                 f"NetBox rejected the API token ({mask_secret(self.config.netbox.token)}): invalid, expired or "
                 "without permission to view virtual machines") from exc
         self.prereqs = resolve_prerequisites(self.netbox, self.config.netbox.cluster, self.config.netbox.tag,
-                                             self.config.netbox.vrf, self.config.netbox.site)
+                                             self.config.netbox.vrf, self.config.netbox.site,
+                                             self.config.netbox.vm_role)
         if self.config.netbox.cluster_group:
             ensure_cluster_group(self.netbox, self.config.netbox.cluster, self.config.netbox.cluster_group)
         self._sync = Synchronizer(self.netbox, self.config, self.prereqs)
