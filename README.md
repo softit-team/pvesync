@@ -355,7 +355,7 @@ Main options:
 | `sync.reconciliation_interval` | `6h` | full Proxmox ⇄ NetBox comparison |
 | `sync.include_templates` | `false` | also sync templates |
 | `sync.exclude_vmids` / `exclude_pve_tags` | `[]` | never sync these VMs |
-| `sync.adopt_existing` | `false` | take over an *unmanaged* NetBox VM with the same name |
+| `sync.adopt_existing` | `true` | take over an *unmanaged* NetBox VM with the same name in the cluster |
 | `sync.adopt_by_ip` | `true` | take over the unmanaged NetBox VM that already has the guest's IP instead of creating a duplicate |
 | `sync.claim_unassigned_ips` | `true` | reuse an existing *unassigned* IP object |
 | `sync.ip_cleanup_policy` | `delete_managed` | see [IP addresses](#ip-addresses) |
@@ -427,21 +427,24 @@ A NetBox VM is managed by an agent **only if all** of these are true:
 3. its `proxmox_source` equals the agent's `sync.source_id`;
 4. its `proxmox_vmid` is set.
 
-Everything else - VMs you created by hand, VMs of other Proxmox environments - is never
-modified or deleted. The VM is identified by VMID (not name), so renames update the existing
+Everything else - VMs of other Proxmox environments, hand-made VMs that are not taken over as
+described below - is never modified or deleted. The VM is identified by VMID (not name), so renames update the existing
 NetBox VM. If a crash ever leaves two owned NetBox VMs for one VMID, the oldest is kept and
 the duplicate removed.
 
 Name clash: if a NetBox VM with the same name exists in the cluster but is not owned, the
-agent logs an error and does not touch it. Set `sync.adopt_existing: true` to take over such
-VMs (only ones without another `proxmox_vmid`/`proxmox_source`).
+agent takes it over (`sync.adopt_existing: true`, the default): it gets the VMID, tag and
+Proxmox values, and keeps its interface and IPs - also when the guest agent is not running. Set
+`sync.adopt_existing: false` to only log an error instead. VMs with another
+`proxmox_vmid`/`proxmox_source` are never taken over.
 
-Same VM, different name: before creating a VM the agent looks the guest's IP up in NetBox. If
+Same VM, different name: if no VM has the name, the agent looks the guest's IP up in NetBox. If
 it is assigned to an unmanaged VM in the cluster (or in no cluster), that VM is taken over and
 renamed to the Proxmox name instead of creating a duplicate; its existing interface and IP are
 kept. If the IP belongs to a VM in another cluster or of another Proxmox source, nothing is
 created and a conflict is logged. Without a known guest IP (agent not running) only the name is
-checked. `sync.adopt_by_ip: false` turns this off.
+checked. A NetBox VM named like *another* Proxmox VM is never taken by IP (two guests report the
+same IP; the one with the name gets it). `sync.adopt_by_ip: false` turns this off.
 
 Host device: every VM gets the device (host) of its cluster. With one device in the cluster that
 one is used; with several, the device named like the Proxmox node. Devices are read at startup.
@@ -526,7 +529,7 @@ only talks HTTPS to the local Proxmox API with its own token.
 | wrong IP chosen | set `ip_selection.prefer_networks` or `exclude_interfaces`, then `sync --vmid N` |
 | `IP conflict: address belongs to another object` | the IP is assigned to another device/VM in NetBox; fix that object (the agent will not steal it) |
 | `Cannot create VM in NetBox: IP belongs to another VM` | the guest's IP is on a VM of another cluster/source: fix that VM or the IP |
-| `Cannot create VM in NetBox: name conflict` | a non-managed NetBox VM has that name: delete/rename it or set `adopt_existing: true` |
+| `Cannot create VM in NetBox: name conflict` | a non-managed NetBox VM has that name and `adopt_existing` is false: set it to `true`, or rename/delete the NetBox VM |
 | `BLOCKED deletion of N VM(s)` | check why so many VMs are missing; then `reconcile --allow-mass-delete` |
 | TLS error to Proxmox | custom certificate on 8006: set `proxmox.api_url` to its hostname or its CA in `ca_bundle` |
 | Service does not start, exit 78 | `netbox-pve-sync check-config` and `test-connection` |

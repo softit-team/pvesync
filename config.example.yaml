@@ -38,7 +38,7 @@ sync:
   include_templates: false
   exclude_vmids: []                         # e.g. [9000, 9001]
   exclude_pve_tags: []                      # Proxmox tags, e.g. ["no-netbox"]
-  adopt_existing: false                     # take over unmanaged NetBox VMs with the same name
+  adopt_existing: true                      # take over unmanaged NetBox VMs with the same name
   adopt_by_ip: true                         # take over the unmanaged NetBox VM that already has the guest's IP
   claim_unassigned_ips: true                # use an existing *unassigned* NetBox IP instead of creating one
   ip_cleanup_policy: delete_managed         # or "unassign"; see README "IP addresses"

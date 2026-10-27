@@ -335,9 +335,12 @@ def test_foreign_vms_are_never_touched(service: SyncService, proxmox: FakeProxmo
     assert ("PATCH", "virtual-machines", other_agent["id"]) not in netbox.writes
 
 
-def test_name_conflict_with_unmanaged_vm(service: SyncService, proxmox: FakeProxmox, netbox: FakeNetBox) -> None:
+def test_name_conflict_with_unmanaged_vm(make_service: ServiceFactory, proxmox: FakeProxmox,
+                                         netbox: FakeNetBox) -> None:
     manual = netbox.add("virtual-machines", name="web01", cluster=netbox.cluster_id(), tags=[], primary_ip4=None,
                         custom_fields={"proxmox_vmid": None, "proxmox_source": None}, memory=1)
+    service = make_service(sync={"adopt_existing": False})
+    service.check_netbox()
     proxmox.add_vm(101, "WEB01")
     with pytest.raises(ConflictError, match="adopt_existing"):
         service.sync_vmid(101)
@@ -661,3 +664,36 @@ def test_adopt_by_ip_can_be_disabled(make_service: ServiceFactory, proxmox: Fake
         svc.sync_vmid(101)
     assert nb_vm(netbox, "web01")["custom_fields"]["proxmox_vmid"] == 101
     assert len(netbox.vms()) == 2
+
+
+def test_same_name_adopted_without_guest_agent_keeps_its_interface(service: SyncService, proxmox: FakeProxmox,
+                                                                   netbox: FakeNetBox) -> None:
+    old, addr = _hand_made_vm(netbox, "web01", "192.168.1.50/24", cluster=netbox.cluster_id())
+    vm = proxmox.add_vm(101, "web01")
+    vm.agent_error = "QEMU guest agent is not running"
+    service.sync_vmid(101)
+    nb = netbox.tables["virtual-machines"][old["id"]]
+    assert nb["custom_fields"]["proxmox_vmid"] == 101
+    assert [i["name"] for i in netbox.interfaces_of(old["id"])] == ["ens18"], "no extra empty eth0"
+    assert nb["primary_ip4"] == addr["id"]
+
+    vm.agent_error = None                                    # guest agent comes up later: no error, nothing moved
+    service.sync_vmid(101, force=True)
+    assert [i["name"] for i in netbox.interfaces_of(old["id"])] == ["ens18"]
+    assert netbox.tables["ip-addresses"][addr["id"]]["assigned_object_id"] == netbox.interfaces_of(old["id"])[0]["id"]
+    assert len(netbox.vms()) == 1 and len(netbox.ips()) == 1
+
+
+def test_ip_adoption_does_not_take_vm_named_after_another_proxmox_vm(service: SyncService, proxmox: FakeProxmox,
+                                                                    netbox: FakeNetBox) -> None:
+    # Two guests report the same IP; NetBox has it on 'rsyslog', which is the name of Proxmox VM 130.
+    old, _ = _hand_made_vm(netbox, "rsyslog", "192.168.1.217/24", cluster=netbox.cluster_id())
+    proxmox.add_vm(121, "inmindLog1.217", ip="192.168.1.217/24")
+    proxmox.add_vm(130, "rsyslog", ip="192.168.1.217/24", mac="BC:24:11:00:00:02")
+    with pytest.raises(ConflictError, match="not taking it over"):
+        service.sync_vmid(121)                               # created on its own, IP conflict reported
+    service.sync_vmid(130)
+    nb = netbox.tables["virtual-machines"][old["id"]]
+    assert nb["name"] == "rsyslog"
+    assert nb["custom_fields"]["proxmox_vmid"] == 130
+    assert nb_vm(netbox, "inmindLog1.217")["custom_fields"]["proxmox_vmid"] == 121

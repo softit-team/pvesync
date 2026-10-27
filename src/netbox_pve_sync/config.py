@@ -226,7 +226,7 @@ class SyncConfig:
     local_check_interval: float = 600.0
     reconciliation_interval: float = 6 * 3600.0
     reconcile_on_startup: bool = True
-    adopt_existing: bool = False
+    adopt_existing: bool = True
     adopt_by_ip: bool = True
     claim_unassigned_ips: bool = True
     ip_cleanup_policy: str = "delete_managed"
@@ -355,7 +355,7 @@ def parse_config(raw: Any, *, env: dict[str, str] | None = None, source_path: Pa
         local_check_interval=sy.opt_duration("local_check_interval", "10m"),
         reconciliation_interval=sy.opt_duration("reconciliation_interval", "6h"),
         reconcile_on_startup=sy.opt_bool("reconcile_on_startup", True),
-        adopt_existing=sy.opt_bool("adopt_existing", False),
+        adopt_existing=sy.opt_bool("adopt_existing", True),
         adopt_by_ip=sy.opt_bool("adopt_by_ip", True),
         claim_unassigned_ips=sy.opt_bool("claim_unassigned_ips", True),
         ip_cleanup_policy=policy,

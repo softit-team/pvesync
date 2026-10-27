@@ -164,7 +164,8 @@ class SyncService:
             self._update_ip_wait(desired, started=started)
             return SyncResult(vmid=vmid, outcome="unchanged", ip_status=desired.ip_status)
 
-        result = self.synchronizer.sync(desired, existing=existing)
+        pve_names = {vm.name.lower(): vm.vmid for vm in resources if vm.name}
+        result = self.synchronizer.sync(desired, existing=existing, pve_names=pve_names)
         if result.outcome in ("created", "updated"):
             log(logger, logging.INFO, f"VM {vmid} synchronized successfully", vmid=vmid, name=desired.name,
                 outcome=result.outcome, changes=result.changes, dry_run=self.dry_run or None)

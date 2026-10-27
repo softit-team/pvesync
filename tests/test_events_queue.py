@@ -175,10 +175,10 @@ def test_one_broken_vm_does_not_block_others(service: SyncService, proxmox: Fake
     proxmox.add_vm(102, "fine", ip="192.168.1.51/24", mac="BC:24:11:00:00:02")
     original = service.synchronizer.sync
 
-    def flaky(desired, existing=None):  # type: ignore[no-untyped-def]
+    def flaky(desired, existing=None, pve_names=None):  # type: ignore[no-untyped-def]
         if desired.vmid == 101:
             raise RuntimeError("boom")
-        return original(desired, existing)
+        return original(desired, existing, pve_names)
     monkeypatch.setattr(service.synchronizer, "sync", flaky)
     service.state.enqueue(101, "task")
     service.state.enqueue(102, "task")

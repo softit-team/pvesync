@@ -118,15 +118,20 @@ class Synchronizer:
         return vms[0]
 
     # ================================================================ public API
-    def sync(self, desired: DesiredVM, existing: list[dict[str, Any]] | None = None) -> SyncResult:
-        """Create or update the NetBox VM for ``desired``. ``existing`` may be passed by the reconciler."""
+    def sync(self, desired: DesiredVM, existing: list[dict[str, Any]] | None = None,
+             pve_names: dict[str, int] | None = None) -> SyncResult:
+        """Create or update the NetBox VM for ``desired``. ``existing`` may be passed by the reconciler.
+
+        ``pve_names`` maps the lower-case names of all Proxmox VMs to their VMIDs; it keeps adoption by
+        IP from taking a NetBox VM that is named after another Proxmox VM.
+        """
         result = SyncResult(vmid=desired.vmid, outcome="unchanged", ip_status=desired.ip_status,
                             warnings=list(desired.warnings))
         owned = self.find_owned(desired.vmid) if existing is None else existing
         vm = self._resolve_duplicates(desired.vmid, owned, result)
 
         if vm is None:
-            vm = self._adopt_or_create(desired, result)
+            vm = self._adopt_or_create(desired, result, pve_names or {})
             if vm is None:
                 return result
         else:
@@ -197,7 +202,8 @@ class Synchronizer:
                 return self.nb.get(EP_VMS, vm_id)
         return None
 
-    def _adopt_by_ip(self, desired: DesiredVM, result: SyncResult) -> tuple[bool, dict[str, Any] | None]:
+    def _adopt_by_ip(self, desired: DesiredVM, result: SyncResult,
+                     pve_names: dict[str, int]) -> tuple[bool, dict[str, Any] | None]:
         """Avoid a duplicate when NetBox already has this VM under another name: find it by its IP.
 
         Returns (handled, vm). ``handled`` False means: go on with the name check / creation.
@@ -208,6 +214,10 @@ class Synchronizer:
         cf = holder.get("custom_fields") or {}
         if self.is_owned(holder):
             return False, None  # another Proxmox VM of ours has this IP: reported as an IP conflict later
+        other = pve_names.get(str(holder.get("name", "")).lower())
+        if other is not None and other != desired.vmid:
+            # Named like another Proxmox VM: that one adopts it by name; two guests share this IP.
+            return False, None
         cluster = obj_id(holder.get("cluster"))
         assert desired.ip is not None
         if cf.get(CF_VMID) is None and cluster in (None, self.prereqs.cluster_id):
@@ -235,12 +245,13 @@ class Synchronizer:
                 return dict(vm)
         return None
 
-    def _adopt_or_create(self, desired: DesiredVM, result: SyncResult) -> dict[str, Any] | None:
-        if self.config.sync.adopt_by_ip:
-            handled, vm = self._adopt_by_ip(desired, result)
+    def _adopt_or_create(self, desired: DesiredVM, result: SyncResult,
+                         pve_names: dict[str, int]) -> dict[str, Any] | None:
+        clash = self._name_taken(desired.name, None)
+        if clash is None and self.config.sync.adopt_by_ip:
+            handled, vm = self._adopt_by_ip(desired, result, pve_names)
             if handled:
                 return vm
-        clash = self._name_taken(desired.name, None)
         if clash is not None:
             cf = clash.get("custom_fields") or {}
             foreign = cf.get(CF_VMID) is not None or (cf.get(CF_SOURCE) not in (None, "", self.source))
@@ -361,10 +372,13 @@ class Synchronizer:
         for iface in ifaces:
             if iface.get("name") == self.ifname:
                 return iface
-        if desired.ip is not None:
-            # An adopted VM may carry its IP on an interface named differently (ens18, ...): use that one.
+        # An adopted VM may carry its IP on an interface named differently (ens18, ...): use that one.
+        # Without a guest IP, follow the VM's primary IP instead of adding an empty eth0 next to it.
+        primary = (vm.get("primary_ip4") or {}).get("address") if isinstance(vm.get("primary_ip4"), dict) else None
+        wanted = desired.ip.address if desired.ip is not None else (_host(primary) if primary else None)
+        if wanted is not None:
             for iface in ifaces:
-                if any(_host(ip["address"]) == desired.ip.address for ip in self.nb.ips_on_interface(int(iface["id"]))):
+                if any(_host(ip["address"]) == wanted for ip in self.nb.ips_on_interface(int(iface["id"]))):
                     return iface
         data = {"virtual_machine": vm_id, "name": self.ifname, "enabled": True, "tags": [self.prereqs.tag_id]}
         try:
@@ -422,8 +436,11 @@ class Synchronizer:
         existing = self.nb.ips_by_address(cidr, self.prereqs.vrf_id)
         mine = [ip for ip in existing if self._belongs_to_vm(ip, vm_id)]
         free = [ip for ip in existing if not ip.get("assigned_object_type")]
-        if mine or (free and self.config.sync.claim_unassigned_ips):
-            ip = sorted(mine or free, key=lambda i: int(i["id"]))[0]
+        if mine:
+            # Already on another interface of this VM: leave it there. NetBox refuses to move a primary IP.
+            return sorted(mine, key=lambda i: int(i["id"]))[0]
+        if free and self.config.sync.claim_unassigned_ips:
+            ip = sorted(free, key=lambda i: int(i["id"]))[0]
             claim: dict[str, Any] = {"assigned_object_type": VMINTERFACE_TYPE, "assigned_object_id": iface_id}
             if _blank_description(ip):
                 claim["description"] = desired.name
